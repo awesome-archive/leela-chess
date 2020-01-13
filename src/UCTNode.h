@@ -29,6 +29,7 @@
 #include "Network.h"
 #include "Position.h"
 #include "SMP.h"
+#include <unordered_set>
 
 class UCTNode {
 public:
@@ -42,14 +43,18 @@ public:
     explicit UCTNode(Move move, float score, float init_eval);
     UCTNode() = delete;
     ~UCTNode();
+    size_t count_nodes() const;
     bool first_visit() const;
     bool has_children() const;
+    void set_active(const bool active);
+    bool active() const;
     bool create_children(std::atomic<int> & nodecount, const BoardHistory& state, float& eval);
     Move get_move() const;
     int get_visits() const;
     float get_score() const;
     void set_score(float score);
     float get_eval(int tomove) const;
+    float get_raw_eval(int tomove) const;
     double get_whiteevals() const;
     void set_visits(int visits);
     void set_whiteevals(double whiteevals);
@@ -57,17 +62,26 @@ public:
     void virtual_loss(void);
     void virtual_loss_undo(void);
     void dirichlet_noise(float epsilon, float alpha);
-    void randomize_first_proportionally();
+    std::vector<float> calc_proportional(float tau, Color color);
+    void randomize_first_proportionally(float tau, Color color);
+    void ensure_first_not_pruned(const std::unordered_set<int>& pruned_moves);
     void update(float eval = std::numeric_limits<float>::quiet_NaN());
 
-    UCTNode* uct_select_child(Color color);
+    UCTNode* uct_select_child(Color color, bool is_root);
     UCTNode* get_first_child() const;
     const std::vector<node_ptr_t>& get_children() const;
 
     void sort_root_children(Color color);
     UCTNode& get_best_root_child(Color color);
+    UCTNode::node_ptr_t find_new_root(Key prevroot_full_key, BoardHistory& new_bh);
+    UCTNode::node_ptr_t find_path(std::vector<Move>& moves);
 
 private:
+    enum Status : char {
+        //INVALID, // superko for Go, NA for chess.
+        PRUNED,
+        ACTIVE
+    };
     void link_nodelist(std::atomic<int>& nodecount, std::vector<Network::scored_node>& nodelist, float init_eval);
 
     // Move
@@ -79,6 +93,7 @@ private:
     float m_score;
     float m_init_eval;
     std::atomic<double> m_whiteevals{0};
+    std::atomic<Status> m_status{ACTIVE};
     // Is someone adding scores to this node?
     // We don't need to unset this.
     bool m_is_expanding{false};

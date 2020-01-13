@@ -15,13 +15,16 @@ upstream backend {
         server 127.0.0.1:8080;
 }
 
+proxy_cache_path /home/web/nginx/cache/ levels=1:2 keys_zone=cache:10m max_size=10g
+                 inactive=60m use_temp_path=off;
+
 # Default server configuration
 #
 server {
 	listen 80 default_server;
 	listen [::]:80 default_server;
 
-	client_max_body_size 64M;
+	client_max_body_size 100M;
 
 	# SSL configuration
 	#
@@ -52,6 +55,16 @@ server {
 	proxy_set_header X-Forwarded-Proto $scheme;
 
 	location / {
+		proxy_cache cache;
+
+		# TODO(gary): Should set the cache-control per page from the server...
+		proxy_ignore_headers Cache-Control;
+		proxy_cache_valid any 1m;
+		# This is critical to avoid thundering herd.  Otherwise, when the 1m timer expires, we will
+		# continue allowing requests through until one finally hits the cache.  This can easily
+		# overload the system.
+		proxy_cache_use_stale updating;
+
 		proxy_pass http://backend;
 	}
 }

@@ -17,6 +17,9 @@ sudo apt-get install -y nginx
 sudo systemctl status nginx
 
 cp nginx/default /etc/nginx/sites-available/default
+
+# Create cache directory
+mkdir -p /home/web/nginx/cache/
 ```
 
 Installing postgres:
@@ -41,6 +44,29 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO web;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
    GRANT SELECT ON TABLES TO web;
 \q
+```
+
+Setting up materialized views:
+```
+gorm=# CREATE MATERIALIZED VIEW games_month AS SELECT user_id, username, count(*) FROM training_games
+LEFT JOIN users
+ON users.id = training_games.user_id
+WHERE training_games.created_at >= now() - INTERVAL '1 month'
+GROUP BY user_id, username
+ORDER BY count DESC;
+SELECT 1606
+gorm=# CREATE MATERIALIZED VIEW games_all AS SELECT user_id, username, count(*) FROM training_games
+LEFT JOIN users
+ON users.id = training_games.user_id
+GROUP BY user_id, username
+ORDER BY count DESC;
+SELECT 3974
+```
+
+Then in crontab:
+```
+REFRESH MATERIALIZED VIEW games_month;
+REFRESH MATERIALIZED VIEW games_all;
 ```
 
 ### Server prereqs
@@ -76,6 +102,25 @@ curl -F 'file=@weights.txt.gz' -F 'training_id=1' -F 'layers=6' -F 'filters=64' 
 Connecting through psql:
 ```
 sudo -u postgres psql -d gorm
+```
+
+Restarting nginx:
+```
+sudo service nginx restart
+```
+
+Postgres online repack
+```
+sudo apt-get install postgresql-server-dev-9.5 mawk
+sudo easy_install pgxnclient
+sudo pgxn install pg_repack
+sudo -u postgres psql -c "CREATE EXTENSION pg_repack" -d gorm
+/usr/lib/postgresql/9.5/bin/pg_repack
+```
+
+Postgres performance tuning
+```
+https://github.com/jfcoz/postgresqltuner
 ```
 
 ### Setting up backup

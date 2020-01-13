@@ -36,54 +36,74 @@
 #include "Training.h"
 #include "Movegen.h"
 #include "pgn.h"
+#include "syzygy/tbprobe.h"
 
 using namespace Utils;
 
 static void license_blurb() {
-    printf(
-        "LCZero Copyright (C) 2017  Gary Linscott\n"
-        "Based on:"
+    myprintf_so(
+        "LCZero %s Copyright (C) 2017-2018  Gary Linscott and contributors\n"
+        "Based on:\n"
         "Leela Chess Copyright (C) 2017 benediamond\n"
-        "Leela Zero Copyright (C) 2017  Gian-Carlo Pascutto\n"
+        "Leela Zero Copyright (C) 2017-2018  Gian-Carlo Pascutto and contributors\n"
         "Stockfish Copyright (C) 2017  Tord Romstad, Marco Costalba, Joona Kiiski, Gary Linscott\n"
         "This program comes with ABSOLUTELY NO WARRANTY.\n"
         "This is free software, and you are welcome to redistribute it\n"
-        "under certain conditions; see the COPYING file for details.\n\n"
+        "under certain conditions; see the COPYING file for details.\n\n",
+        PROGRAM_VERSION
     );
 }
 
 static std::string parse_commandline(int argc, char *argv[]) {
     namespace po = boost::program_options;
     // Declare the supported options.
-    po::options_description v_desc("Allowed options");
+    po::options_description v_desc("If you have further questions about what an option does, see "
+                                   "the project wiki:\n"
+                                   "https://github.com/glinscott/leela-chess/wiki\n\n"
+                                   "For non-deterministic play that retains strength, use "
+                                   "'--noise' or '--tempdecay 10'.\n\n"
+                                   "Allowed options");
     v_desc.add_options()
         ("help,h", "Show commandline options.")
         ("threads,t", po::value<int>()->default_value
-                      (std::min(2, cfg_num_threads)),
+                      (std::min(cfg_num_threads, cfg_max_threads)),
                       "Number of threads to use.")
         ("playouts,p", po::value<int>(),
-                       "Weaken engine by limiting the number of playouts. "
-                       "Requires --noponder.")
+                       "Weaken engine by limiting the number of playouts. ")
+        ("nodes,v", po::value<int>(),
+                       "Weaken engine by limiting the number of nodes in the tree.")
         ("resignpct,r", po::value<int>()->default_value(cfg_resignpct),
-                        "Resign when winrate is less than x%.")
-        ("noise,n", "Apply dirichlet noise to root.")
-        ("randomize", "Randomize move selection at root (only useful for training).")
+                       "Resign when winrate is less than x%.")
+        ("noise,n", "Before search begins, add Dirichlet noise to the root node policy's move "
+                    "probabilities.")
+        ("randomize,m", "After search is complete, select from the moves in proportion to "
+                        "their relative values (rather than 'best only').")
+        ("tempdecay,d", po::value<int>(),
+                       "After search is complete, sometimes pick weaker moves for variety. "
+                       "Larger tempdecay values will do this less often, and the effect "
+                       "is reduced for moves later in the game. `0` is equivalent to "
+                       "--randomize and results in more random moves. This is used by "
+                       "self-play games to explore new moves. `10` is a reasonable value, "
+                       "and is used by test matches on the server for variety.")
         ("seed,s", po::value<std::uint64_t>(),
                    "Random number generation seed.")
         ("weights,w", po::value<std::string>(), "File with network weights.")
+        ("syzygypath,e", po::value<std::string>(), "Folder with syzygy endgame tablebases.")
         ("logfile,l", po::value<std::string>(), "File to log input/output to.")
         ("quiet,q", "Disable all diagnostic output.")
-        ("noponder", "Disable thinking on opponent's time.")
+        ("uci", "Don't initialize the engine until \"isready\" command is sent. Use this if your "
+                "GUI is freezing on startup.")
         ("start", po::value<std::string>(), "Start command {train, bench}.")
         ("supervise", po::value<std::string>(), "Dump supervised learning data from the pgn.")
+#ifdef USE_OPENCL
         ("gpu",  po::value<std::vector<int> >(),
                 "ID of the OpenCL device(s) to use (disables autodetection).")
-#ifdef USE_OPENCL
         ("full-tuner", "Try harder to find an optimal OpenCL tuning.")
         ("tune-only", "Tune OpenCL only and then exit.")
 #endif
 #ifdef USE_TUNER
         ("puct", po::value<float>())
+        ("fpu_reduction", po::value<float>())
         ("softmax_temp", po::value<float>())
 #endif
         ;
@@ -91,7 +111,10 @@ static std::string parse_commandline(int argc, char *argv[]) {
     // command line.
     po::options_description h_desc("Hidden options");
     h_desc.add_options()
-        ("arguments", po::value<std::vector<std::string>>());
+        ("arguments", po::value<std::vector<std::string>>())
+        ("visits", po::value<int>(),
+                     "Weaken engine by limiting the number of visits. This spelling is deprecated.")
+        ;
     // Parse both the above, we will check if any of the latter are present.
     po::options_description all("All options");
     all.add(v_desc).add(h_desc);
@@ -133,6 +156,9 @@ static std::string parse_commandline(int argc, char *argv[]) {
     if (vm.count("puct")) {
         cfg_puct = vm["puct"].as<float>();
     }
+    if (vm.count("fpu_reduction")) {
+        cfg_fpu_reduction = vm["fpu_reduction"].as<float>();
+    }
     if (vm.count("softmax_temp")) {
         cfg_softmax_temp = vm["softmax_temp"].as<float>();
     }
@@ -151,18 +177,23 @@ static std::string parse_commandline(int argc, char *argv[]) {
     if (vm.count("weights")) {
         cfg_weightsfile = vm["weights"].as<std::string>();
     } else if (cfg_supervise.empty()) {
-        myprintf("A network weights file is required to use the program.\n");
-        exit(EXIT_FAILURE);
+        cfg_weightsfile = "weights.txt";
+    }
+
+    if (vm.count("syzygypath")) {
+        cfg_syzygypath = vm["syzygypath"].as<std::string>();
     }
 
     if (vm.count("threads")) {
         int num_threads = vm["threads"].as<int>();
-        if (num_threads > cfg_num_threads) {
-            myprintf("Clamping threads to maximum = %d\n", cfg_num_threads);
-        } else if (num_threads != cfg_num_threads) {
+        if (num_threads > cfg_max_threads) {
+            myprintf("Clamping threads to maximum = %d\n", cfg_max_threads);
+            cfg_num_threads = cfg_max_threads;
+        } else {
             myprintf("Using %d thread(s).\n", num_threads);
             cfg_num_threads = num_threads;
         }
+
     }
 
     if (vm.count("seed")) {
@@ -185,8 +216,8 @@ static std::string parse_commandline(int argc, char *argv[]) {
         myprintf("RNG seed from cli: %llu\n", cfg_rng_seed);
     }
 
-    if (vm.count("noponder")) {
-        cfg_allow_pondering = false;
+    if (vm.count("uci")) {
+        cfg_noinitialize = true;
     }
 
     if (vm.count("noise")) {
@@ -195,16 +226,37 @@ static std::string parse_commandline(int argc, char *argv[]) {
 
     if (vm.count("randomize")) {
         cfg_randomize = true;
+        // When cfg_randomize is on, we need an accurate estimate of
+        // how good/bad all moves are, so turn cfg_timemanage off.
+        cfg_timemanage = false;
+    }
+
+    if (vm.count("tempdecay")) {
+        cfg_root_temp_decay = vm["tempdecay"].as<int>();
+        if (cfg_root_temp_decay < 0) {
+            myprintf("Nonsensical options: The temperature decay constant cannot be assigned a negative value, since that would turn the search useless in later game.\n");
+            exit(EXIT_FAILURE);
+        }
+        cfg_randomize = true;
+        // Setting a value for temperature decay constant also activates --randomize.
+        // However, time management is not deactivated by --tempdecay
     }
 
     if (vm.count("playouts")) {
         cfg_max_playouts = vm["playouts"].as<int>();
-        if (!vm.count("noponder")) {
-            myprintf("Nonsensical options: Playouts are restricted but "
-                     "thinking on the opponent's time is still allowed. "
-                     "Add --noponder if you want a weakened engine.\n");
-            exit(EXIT_FAILURE);
+        if (!vm.count("visits") && !vm.count("nodes")) {
+            // If the user specifies playouts they probably
+            // do not want the default 800 nodes.
+            cfg_max_nodes = MAXINT_DIV2;
         }
+    }
+
+    if (vm.count("visits")) {
+        cfg_max_nodes = vm["visits"].as<int>();
+    }
+    // let deprecated spelling be overwritten by new/correct spelling
+    if (vm.count("nodes")) {
+        cfg_max_nodes = vm["nodes"].as<int>();
     }
 
     if (vm.count("resignpct")) {
@@ -282,7 +334,7 @@ void generate_supervised_data(const std::string& filename) {
   fs::path dir("supervise-" + fp.stem().string());
   if (!fs::exists(dir)) {
     fs::create_directories(dir);
-    printf("Created dirs %s\n", dir.string().c_str());
+    myprintf_so("Created dirs %s\n", dir.string().c_str());
   }
   auto chunker = OutputChunker{dir.string() + "/training", true, 15000};
 
@@ -295,10 +347,10 @@ void generate_supervised_data(const std::string& filename) {
     Training::clear_training();
     auto game = parser.parse();
     if (game == nullptr) {
-      printf("Invalid game in %s\n", filename.c_str());
+      myprintf_so("Invalid game in %s\n", filename.c_str());
       break;
     }
-    printf("\rProcessed %d games", ++games);
+    myprintf_so("\rProcessed %d games", ++games);
     BoardHistory bh;
     bh.set(Position::StartFEN);
     for (int i = 0; i < static_cast<int>(game->bh.positions.size()) - 1; ++i) {
@@ -332,13 +384,17 @@ int main(int argc, char* argv[]) {
 #endif
   thread_pool.initialize(cfg_num_threads);
   // Random::GetRng().seedrandom(cfg_rng_seed);
-  Network::initialize();
-
-  if (!cfg_supervise.empty()) {
-    generate_supervised_data(cfg_supervise);
-    return 0;
+  if (!cfg_noinitialize) {
+      Network::initialize();
   }
 
+  if (!cfg_supervise.empty()) {
+      generate_supervised_data(cfg_supervise);
+      return 0;
+  }
+
+  Tablebases::init(cfg_syzygypath);
+  UCI::init(Options);
   UCI::loop(uci_start);
 
   return 0;

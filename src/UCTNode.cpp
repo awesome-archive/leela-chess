@@ -31,10 +31,12 @@
 #include <algorithm>
 #include <random>
 #include <numeric>
+#include <boost/range/adaptor/reversed.hpp>
 
 #include "Position.h"
 #include "Parameters.h"
 #include "Movegen.h"
+#include "UCI.h"
 #include "UCTNode.h"
 #include "UCTSearch.h"
 #include "Utils.h"
@@ -166,18 +168,41 @@ void UCTNode::dirichlet_noise(float epsilon, float alpha) {
     }
 }
 
-void UCTNode::randomize_first_proportionally() {
-    auto accum = uint32{0};
-    auto accum_vector = std::vector<uint32>{};
+std::vector<float> UCTNode::calc_proportional(float tau, Color color) {
+    auto accum = 0.0f;
+    auto parent_visits = get_visits();
+    auto accum_vector = std::vector<float>{};
+    auto& best_child = get_best_root_child(color);
+
+    // Calculate exponentiated visit count vector
     for (const auto& child : m_children) {
-        accum += child->get_visits();
+        if ((child->get_eval(color) > best_child.get_eval(color) - cfg_rand_eval_maxdiff) &&
+            (child->get_visits() > best_child.get_visits() * cfg_rand_visit_floor)) {
+            // Only increment accum for children that reach the thresholds.
+            accum += std::pow(1.0f*child->get_visits()/parent_visits, 1.0f/tau);
+        }
         accum_vector.emplace_back(accum);
     }
 
-    auto pick = Random::GetRng().RandInt<std::uint32_t>(accum);
+    // normalize
+    for (auto& prob : accum_vector) {
+        prob /= accum;
+    }
+
+    return accum_vector;
+}
+
+void UCTNode::randomize_first_proportionally(float tau, Color color) {
+    auto accum_vector = calc_proportional(tau, color);
+
+    // For the root move selection, a random number between 0 and the integer numerical
+    // limit (~2.1e9) is scaled to the cumulative exponentiated visit count
+    auto int_limit = std::numeric_limits<int>::max();
+    auto pick = Random::GetRng().RandInt<std::uint32_t>(int_limit);
+    auto pick_scaled = pick*accum_vector.back()/int_limit;
     auto index = size_t{0};
     for (size_t i = 0; i < accum_vector.size(); i++) {
-        if (pick < accum_vector[i]) {
+        if (pick_scaled < accum_vector[i]) {
             index = i;
             break;
         }
@@ -191,6 +216,25 @@ void UCTNode::randomize_first_proportionally() {
     // Now swap the child at index with the first child
     assert(index < m_children.size());
     std::iter_swap(begin(m_children), begin(m_children) + index);
+}
+
+void UCTNode::ensure_first_not_pruned(const std::unordered_set<int>& pruned_moves) {
+    size_t selectedIndex = size_t{0};
+    for (size_t i = 0; i < m_children.size(); i++) {
+        if (!pruned_moves.count((int)m_children[i]->get_move())) {
+            selectedIndex = i;
+            break;
+        }
+    }
+
+    // Take the early out
+    if (selectedIndex == 0) {
+        return;
+    }
+
+    // Now swap the child at index with the first child
+    assert(selectedIndex < m_children.size());
+    std::iter_swap(begin(m_children), begin(m_children) + selectedIndex);
 }
 
 Move UCTNode::get_move() const {
@@ -256,6 +300,27 @@ float UCTNode::get_eval(int tomove) const {
     }
 }
 
+float UCTNode::get_raw_eval(int tomove) const {
+    // For use in the FPU, a dynamic evaluation which is unaffected by
+    // virtual losses is also required.
+    auto visits = get_visits();
+    if (visits > 0) {
+        auto whiteeval = get_whiteevals();
+        auto score = static_cast<float>(whiteeval / (double)visits);
+        if (tomove == BLACK) {
+            score = 1.0f - score;
+        }
+        return score;
+    } else {
+        // If a node has not been visited yet, the eval is that of the parent.
+        auto eval = m_init_eval;
+        if (tomove == BLACK) {
+            eval = 1.0f - eval;
+        }
+        return eval;
+    }
+} 
+
 double UCTNode::get_whiteevals() const {
     return m_whiteevals;
 }
@@ -268,27 +333,54 @@ void UCTNode::accumulate_eval(float eval) {
     atomic_add(m_whiteevals, (double)eval);
 }
 
-UCTNode* UCTNode::uct_select_child(Color color) {
+UCTNode* UCTNode::uct_select_child(Color color, bool is_root) {
     UCTNode* best = nullptr;
-    float best_value = -1000.0f;
+    auto best_value = std::numeric_limits<double>::lowest();
 
     LOCK(m_nodemutex, lock);
-    // Count parentvisits.
-    // We do this manually to avoid issues with transpositions.
+
+    // Count parentvisits manually to avoid issues with transpositions.
+    auto total_visited_policy = 0.0f;
     auto parentvisits = size_t{0};
+    // Net eval can be obtained from an unvisited child. This is invalid
+    // if there are no unvisited children, but then this isn't used in that case.
+    auto net_eval = 0.0f;
     for (const auto& child : m_children) {
         parentvisits += child->get_visits();
+        if (child->get_visits() > 0) {
+            total_visited_policy += child->get_score();
+        } else {
+            net_eval = child->get_eval(color);
+        }
     }
-    float numerator = std::sqrt((double)parentvisits);
+
+    auto numerator = std::sqrt((double)parentvisits);
+    auto fpu_reduction = 0.0f;
+    // Lower the expected eval for moves that are likely not the best.
+    // Do not do this if we have introduced noise at this node exactly
+    // to explore more.
+    if (!is_root || !cfg_noise) {
+        fpu_reduction = cfg_fpu_reduction * std::sqrt(total_visited_policy);
+    }
+
+    // Estimated eval for unknown nodes = original parent NN eval - reduction
+    // Or curent parent eval - reduction if dynamic_eval is enabled.
+    auto fpu_eval = (cfg_fpu_dynamic_eval ? get_raw_eval(color) : net_eval) - fpu_reduction;
 
     for (const auto& child : m_children) {
-        // get_eval() will automatically set first-play-urgency
-        auto winrate = child->get_eval(color);
+        if (!child->active()) {
+            continue;
+        }
+
+        float winrate = fpu_eval;
+        if (child->get_visits() > 0) {
+            winrate = child->get_eval(color);
+        }
         auto psa = child->get_score();
         auto denom = 1.0f + child->get_visits();
         auto puct = cfg_puct * psa * (numerator / denom);
         auto value = winrate + puct;
-        assert(value > -1000.0f);
+        assert(value > std::numeric_limits<double>::lowest());
 
         if (value > best_value) {
             best_value = value;
@@ -337,6 +429,17 @@ UCTNode& UCTNode::get_best_root_child(Color color) {
                               NodeComp(color))->get());
 }
 
+size_t UCTNode::count_nodes() const {
+    auto nodecount = size_t{0};
+    if (m_has_children) {
+        nodecount += m_children.size();
+        for (auto& child : m_children) {
+            nodecount += child->count_nodes();
+        }
+    }
+    return nodecount;
+}
+
 UCTNode* UCTNode::get_first_child() const {
     if (m_children.empty()) {
         return nullptr;
@@ -346,4 +449,51 @@ UCTNode* UCTNode::get_first_child() const {
 
 const std::vector<UCTNode::node_ptr_t>& UCTNode::get_children() const {
     return m_children;
+}
+
+// Search the new_bh backwards and see if we can find the prevroot_full_key.
+// May not find it if e.g. the user asked to evaluate some different position.
+UCTNode::node_ptr_t UCTNode::find_new_root(Key prevroot_full_key, BoardHistory& new_bh) {
+    UCTNode::node_ptr_t new_root = nullptr;
+    std::vector<Move> moves;
+    for (auto pos : boost::adaptors::reverse(new_bh.positions)) {
+        if (pos.full_key() == prevroot_full_key) {
+            new_root = find_path(moves);
+            break;
+        }
+        moves.push_back(pos.get_move());
+    }
+    return new_root;
+}
+
+// Take the moves found by find_new_root and try to find the new root node.
+// May not find it if the search didn't include that node.
+UCTNode::node_ptr_t UCTNode::find_path(std::vector<Move>& moves) {
+    if (moves.size() == 0) {
+        // TODO this means the current root is actually a match.
+        // This only happens if you e.g. undo a move.
+        // For now just ignore this case.
+        return nullptr;
+    }
+    auto move = moves.back();
+    moves.pop_back();
+    for (auto& node : m_children) {
+        if (node->get_move() == move) {
+            if (moves.size() > 0) {
+                // Keep going recursively through the move list.
+                return node->find_path(moves);
+            } else {
+                return std::move(node);
+            }
+        }
+    }
+    return nullptr;
+}
+
+void UCTNode::set_active(const bool active) {
+    m_status = active ? ACTIVE : PRUNED;
+}
+
+bool UCTNode::active() const {
+    return m_status == ACTIVE;
 }

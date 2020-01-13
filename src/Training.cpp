@@ -23,7 +23,6 @@
 #include <sstream>
 #include <algorithm>
 #include <boost/filesystem.hpp>
-#include <boost/utility.hpp>
 #include "stdlib.h"
 #include "zlib.h"
 #include "string.h"
@@ -102,17 +101,24 @@ void Training::clear_training() {
     Training::m_data.clear();
 }
 
+// Used by supervised learning
 void Training::record(const BoardHistory& state, Move move) {
     auto step = TimeStep{};
     step.to_move = state.cur().side_to_move();
     step.planes = Network::NNPlanes{};
     Network::gather_features(state, step.planes);
 
-    step.probabilities.resize(Network::NUM_OUTPUT_POLICY);
-    step.probabilities[Network::lookup(move)] = 1.0;
+    // TODO: Does the SL flow require you to load a network file?
+    // Because now Network parses the file and stores m_format_version.
+    // Probably we will need a setter function
+    // e.g. Network::set_format_version(2)
+    throw std::runtime_error("Need to update SL flow");
+    step.probabilities.resize(Network::get_num_output_policy());
+    step.probabilities[Network::lookup(move, state.cur().side_to_move())] = 1.0;
     m_data.emplace_back(step);
 }
 
+// Used by self play
 void Training::record(const BoardHistory& state, UCTNode& root) {
     auto step = TimeStep{};
     step.to_move = state.cur().side_to_move();
@@ -127,7 +133,7 @@ void Training::record(const BoardHistory& state, UCTNode& root) {
     step.child_uct_winrate = best_node.get_eval(step.to_move);
     step.bestmove_visits = best_node.get_visits();
 
-    step.probabilities.resize(Network::NUM_OUTPUT_POLICY);
+    step.probabilities.resize(Network::get_num_output_policy());
 
     // Get total visit amount. We count rather
     // than trust the root to avoid ttable issues.
@@ -147,7 +153,7 @@ void Training::record(const BoardHistory& state, UCTNode& root) {
     for (const auto& child : root.get_children()) {
         auto prob = static_cast<float>(child->get_visits() / sum_visits);
         auto move = child->get_move();
-        step.probabilities[Network::lookup(move)] = prob;
+        step.probabilities[Network::lookup(move, state.cur().side_to_move())] = prob;
     }
 
     m_data.emplace_back(step);
@@ -158,6 +164,9 @@ void Training::dump_training(int game_score, const std::string& out_filename) {
     dump_training(game_score, chunker);
 }
 
+// Reverse bit order.
+// Required for all dump_training that use binary format.
+// (VERSION2 and up)
 Network::BoardPlane fix_v2(Network::BoardPlane plane) {
     for (int i = 0, n = plane.size(); i < n; i+=8) {
         for (auto j = 0; j < 4; j++) {
@@ -172,41 +181,27 @@ Network::BoardPlane fix_v2(Network::BoardPlane plane) {
 
 
 void Training::dump_training_v2(int game_score, OutputChunker& outchunk) {
-    /**
-     * From chunkparser.py
-     *
-     * V2 Format (8604 bytes total)
-     * int32 version (4 bytes)
-     * 1924 float32 probabilities (7696 bytes)
-     * 112 packed bit planes (896 bytes)
-     * uint8 castling us_ooo (1 byte)
-     * uint8 castling us_oo (1 byte)
-     * uint8 castling them_ooo (1 byte)
-     * uint8 castling them_oo (1 byte)
-     * uint8 side_to_move (1 byte)
-     * uint8 rule50_count (1 byte)
-     * uint8 move_count (1 byte)
-     * int8 result (1 byte)
-     * self.v2_struct = struct.Struct('4s7696s896sBBBBBBBb')
-     */
-    static int VERSION = 2;
+    // See chunkparser.py for exact format.
+    // format_version 1 was for VERSION1 and VERSION2 of traininig data.
+    // format_version 2 must used VERSION3 of training data.
+    static int VERSION = Network::get_format_version() + 1;
+    assert(VERSION == 2 || VERSION == 3);
 
     std::stringstream out;
     for (const auto& step : m_data) {
         // Store the binary version number (4 bytes)
         out.write(reinterpret_cast<char*>(&VERSION), sizeof(VERSION));
 
-        // Then the move probabilities (7696 bytes)
-        assert(step.probabilities.size()*sizeof(step.probabilities[0]) == 7696);
+        // Then the move probabilities
+        assert(step.probabilities.size() == Network::get_num_output_policy());
         for (auto p : step.probabilities) {
             uint32 *vp = reinterpret_cast<uint32*>(&p);
             uint32 v = htole32(*vp);
             out.write(reinterpret_cast<char*>(&v), sizeof(v));
         }
 
-        // 112 bitplanes (896 bytes)
-        int kFeatureBase = Network::T_HISTORY * 14;
-        assert(kFeatureBase*sizeof(step.planes.bit[0].to_ullong()) == 896);
+        // bitplanes
+        int kFeatureBase = Network::T_HISTORY * Network::get_hist_planes();
         for (int p = 0; p < kFeatureBase; p++) {
             const auto& plane = fix_v2(step.planes.bit[p]);
             auto val = htole64(plane.to_ullong());
@@ -232,7 +227,9 @@ void Training::dump_training_v2(int game_score, OutputChunker& outchunk) {
         auto result = static_cast<std::int8_t>(step.to_move == BLACK ? -game_score : game_score);
         out.write(reinterpret_cast<char*>(&result), 1);
     }
-    assert(out.str().size() == m_data.size() * 8604);
+    assert(Network::get_format_version() == 1
+        ? out.str().size() == m_data.size() * 8604
+        : out.str().size() == m_data.size() * 8276);
     outchunk.append(out.str());
 }
 
@@ -244,11 +241,11 @@ void Training::dump_training(int game_score, OutputChunker& outchunk) {
             const auto& plane = step.planes.bit[p];
             // Write it out as a string of hex characters
             for (auto bit = size_t{0}; bit + 3 < plane.size(); bit += 4) {
-                auto hexbyte =  plane[bit]     << 3
-                              | plane[bit + 1] << 2
-                              | plane[bit + 2] << 1
-                              | plane[bit + 3] << 0;
-                out << std::hex << hexbyte;
+                auto hexdigit =  plane[bit]     << 3
+                               | plane[bit + 1] << 2
+                               | plane[bit + 2] << 1
+                               | plane[bit + 3] << 0;
+                out << std::hex << hexdigit;
             }
             assert(plane.size() % 4 == 0);
             out << std::dec << std::endl;
@@ -261,7 +258,7 @@ void Training::dump_training(int game_score, OutputChunker& outchunk) {
         // Then the move probabilities
         for (auto it = begin(step.probabilities); it != end(step.probabilities); ++it) {
             out << *it;
-            if (boost::next(it) != end(step.probabilities)) {
+            if (std::next(it) != end(step.probabilities)) {
                 out << " ";
             }
         }

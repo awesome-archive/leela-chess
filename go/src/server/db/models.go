@@ -39,6 +39,8 @@ type Network struct {
 
 	// Cached here, as expensive to do COUNT(*) on Postgresql
 	GamesPlayed int
+
+	Elo float64
 }
 
 type Match struct {
@@ -61,6 +63,9 @@ type Match struct {
 	GameCap int
 	Done    bool
 	Passed  bool
+
+	// If true, this is not a promotion match
+	TestOnly bool
 }
 
 type MatchGame struct {
@@ -77,6 +82,8 @@ type MatchGame struct {
 	Result  int
 	Done    bool
 	Flip    bool
+
+	EngineVersion string
 }
 
 type TrainingGame struct {
@@ -92,6 +99,13 @@ type TrainingGame struct {
 
 	Version   uint
 	Path      string
-	Pgn       string
 	Compacted bool
+
+	EngineVersion string
+}
+
+type ServerData struct {
+	gorm.Model
+
+	TrainingPgnUploaded int
 }

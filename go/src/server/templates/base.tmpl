@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="viewport" content="width=980">
     <meta name="description" content="LCZero - Chess learned from scratch">
     <meta name="author" content="Gary Linscott">
 
@@ -27,7 +27,7 @@
 
     <div class="container-fluid">
       <div class="row">
-        <nav class="col-md-2 d-none d-md-block bg-light sidebar">
+        <nav class="col-2 d-block bg-light sidebar">
           <div class="sidebar-sticky">
             <ul class="nav flex-column">
               <li class="nav-item">
@@ -49,22 +49,50 @@
                 </a>
               </li>
               <li class="nav-item">
-                <a class="nav-link" href="https://github.com/glinscott/leela-chess">
+                <a class="nav-link" href="https://github.com/LeelaChessZero/">
                   <span data-feather="github"></span>
                   Github
                 </a>
               </li>
               <li class="nav-item">
-                <a class="nav-link" href="/networks">Networks</a>
+                <a class="nav-link" href="/networks">
+                  <span data-feather="cpu"></span>
+                  Networks
+                </a>
               </li>
               <li class="nav-item">
-                <a class="nav-link" href="/matches">Matches</a>
+                <a class="nav-link" href="/matches">
+                  <span data-feather="minimize-2"></span>
+                  Matches
+                </a>
               </li>
               <li class="nav-item">
-                <a class="nav-link" href="/training_runs">Training Runs</a>
+                <a class="nav-link" href="/active_users">
+                  <span data-feather="users"></span>
+                  Active Users
+                </a>
               </li>
               <li class="nav-item">
-                <a class="nav-link" href="/stats">Stats</a>
+                <a class="nav-link" href="/training_runs">
+                  <span data-feather="target"></span>
+                  Training Runs
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="/stats">
+                  <span data-feather="bar-chart-2"></span>
+                  Stats</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="/training_data">
+                  <span data-feather="database"></span>
+                  Training Data
+                </a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="/?full_elo=1">
+                  <span data-feather="trending-up"></span>
+                  Full ELO Graph</a>
               </li>
               <li class="nav-item">
                 <a class="nav-link" href="https://discord.gg/pKujYxD">
@@ -72,11 +100,17 @@
                   LCZero Chat
                 </a>
               </li>
+              <li class="nav-item">
+                <a class="nav-link" href="http://play.lczero.org/">
+                  <span data-feather="play-circle"></span>
+                  Play LCZero!
+                </a>
+              </li>
             </ul>
           </div>
         </nav>
 
-        <main role="main" class="col-md-9 ml-sm-auto col-lg-10 pt-3 px-4">
+        <main role="main" class="col-10 ml-auto pt-3 px-4">
           {{template "content" .}}
         </main>
       </div>

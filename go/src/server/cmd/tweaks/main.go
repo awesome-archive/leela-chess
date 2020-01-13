@@ -39,9 +39,9 @@ func makeRunActive() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	training_run.Active = true
-	training_run.Description = "Initial testing run"
-	training_run.TrainParameters = `["--randomize", "-n"]`
+	//training_run.Active = true
+	//training_run.Description = "Initial testing run"
+	training_run.TrainParameters = `["--randomize", "-n", "-v800"]`
 	err = db.GetDB().Save(&training_run).Error
 	if err != nil {
 		log.Fatal(err)
@@ -51,14 +51,28 @@ func makeRunActive() {
 func newMatch() {
 	match := db.Match{
 		TrainingRunID: 1,
-		CandidateID:   4,
-		CurrentBestID: 3,
-		Wins:          89,
-		Losses:        4,
-		Draws:         7,
-		Done:          true,
+		CandidateID:   237,
+		CurrentBestID: 316,
+		Done:          false,
+		GameCap:       400,
+		Parameters:    `["--tempdecay=10"]`,
+		TestOnly:      true,
 	}
 	err := db.GetDB().Create(&match).Error
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func setTestOnly() {
+	match := db.Match{}
+	match.ID = 90
+	err := db.GetDB().Where(&match).First(&match).Error
+	if err != nil {
+		log.Fatal(err)
+	}
+	match.TestOnly = true
+	err = db.GetDB().Save(&match).Error
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -79,6 +93,30 @@ func updateMatchPassed() {
 	}
 }
 
+/*
+func dumpPgns() {
+	start := 9168243
+	end := 10014931
+	for id := start; id < end; id++ {
+		fmt.Printf("\r%d",id)
+		game := db.TrainingGame{
+			ID: uint64(id),
+		}
+		err := db.GetDB().Where(&game).First(&game).Error
+		if err != nil {
+			fmt.Printf(" - skipping\n")
+			continue
+		}
+		pgn_path := fmt.Sprintf("/home/web/leela-chess/go/src/server/pgns/run1/%d.pgn", game.ID)
+		err = ioutil.WriteFile(pgn_path, []byte(game.Pgn), 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	fmt.Printf("\n")
+}
+*/
+
 func main() {
 	db.Init(true)
 	db.SetupDB()
@@ -86,8 +124,10 @@ func main() {
 	// newRun()
 	// makeRunActive()
 	// newMatch()
+	// setTestOnly()
 	// updateNetworkCounts()
 	// updateMatchPassed()
+	// dumpPgns()
 
 	defer db.Close()
 }

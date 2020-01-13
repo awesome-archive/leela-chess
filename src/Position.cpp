@@ -315,7 +315,7 @@ void Position::set_check_info(StateInfo* si) const {
 
 void Position::set_state(StateInfo* si) const {
 
-  si->key = 0;
+  si->key = si->materialKey = 0;
   si->checkersBB = attackers_to(square<KING>(sideToMove)) & pieces(~sideToMove);
 
   set_check_info(si);
@@ -334,6 +334,11 @@ void Position::set_state(StateInfo* si) const {
       si->key ^= Zobrist::side;
 
   si->key ^= Zobrist::castling[si->castlingRights];
+  for (Piece pc : Pieces)
+  {
+      for (int cnt = 0; cnt < pieceCount[pc]; ++cnt)
+          si->materialKey ^= Zobrist::psq[pc][cnt];
+  }
 }
 
 
@@ -694,6 +699,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       // Update material hash key and prefetch access to materialTable
       k ^= Zobrist::psq[captured][capsq];
 //      prefetch(thisThread->materialTable[st->materialKey]);
+      st->materialKey ^= Zobrist::psq[captured][pieceCount[captured]];
 
       // Reset rule 50 counter
       st->rule50 = 0;
@@ -744,6 +750,8 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
 
           // Update hash keys
           k ^= Zobrist::psq[pc][to] ^ Zobrist::psq[promotion][to];
+          st->materialKey ^= Zobrist::psq[promotion][pieceCount[promotion] - 1]
+              ^ Zobrist::psq[pc][pieceCount[pc]];
       }
 
       // prefetch access to pawnsTable
@@ -982,6 +990,33 @@ int Position::repetitions_count() const {
 }
 
 
+// Position::has_repeated() tests whether there has been at least one repetition
+// of positions since the last capture or pawn move.
+
+bool Position::has_repeated() const {
+
+    StateInfo* stc = st;
+    while (true)
+    {
+        int i = 4, e = std::min(stc->rule50, stc->pliesFromNull);
+
+        if (e < i)
+            return false;
+
+        StateInfo* stp = st->previous->previous;
+
+        do {
+            stp = stp->previous->previous;
+
+            if (stp->key == stc->key)
+                return true;
+
+            i += 2;
+        } while (i <= e);
+
+        stc = stc->previous;
+    }
+}
 /// Position::flip() flips position with the white and black sides reversed. This
 /// is only useful for debugging e.g. for finding evaluation symmetry bugs.
 
@@ -1126,7 +1161,7 @@ std::string Position::move_to_san(Move m) const {
         result += file;
         result += rank;
       }
-    } else if (type_of(pc) == PAWN && board[to] != NO_PIECE) {
+    } else if (type_of(pc) == PAWN && (board[to] != NO_PIECE || type_of(m) == ENPASSANT)) {
       result += file;
     }
 
@@ -1415,6 +1450,13 @@ void BoardHistory::do_move(Move m) {
   states.emplace_back(new StateInfo);
   positions.push_back(positions.back());
   positions.back().do_move(m, *states.back());
+}
+
+bool BoardHistory::undo_move() {
+	if (positions.size() == 1) return false;
+	states.pop_back();
+	positions.pop_back();
+	return true;
 }
 
 std::string BoardHistory::pgn() const {

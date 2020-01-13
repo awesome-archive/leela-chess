@@ -22,7 +22,7 @@
 #include <memory>
 #include <atomic>
 #include <tuple>
-#include <unordered_map>
+#include <unordered_set>
 
 #include "Position.h"
 #include "UCTNode.h"
@@ -67,33 +67,47 @@ public:
     static constexpr auto MAX_TREE_SIZE = 40'000'000;
 
     UCTSearch(BoardHistory&& bh);
-    Move think();
+    Move think(BoardHistory&& bh);
     void set_playout_limit(int playouts);
+    void set_node_limit(int nodes);
     void set_analyzing(bool flag);
     void set_quiet(bool flag);
     void ponder();
     bool is_running() const;
-    bool playout_limit_reached() const;
+    int est_playouts_left() const;
+    size_t prune_noncontenders();
+    bool have_alternate_moves();
+    bool pv_limit_reached() const;
     void increment_playouts();
-    bool halt_search();
-    SearchResult play_simulation(BoardHistory& bh, UCTNode* const node);
-    
+    bool should_halt_search();
+    void please_stop();
+    SearchResult play_simulation(BoardHistory& bh, UCTNode* const node, int sdepth);
+
 private:
     void dump_stats(BoardHistory& pos, UCTNode& parent);
-    std::string get_pv(BoardHistory& pos, UCTNode& parent);
+    std::string get_pv(BoardHistory& pos, UCTNode& parent, bool use_san);
     void dump_analysis(int64_t elapsed, bool force_output);
     Move get_best_move();
+    float get_root_temperature();
 
     BoardHistory bh_;
-    UCTNode m_root{MOVE_NONE, 0.0f, 0.5f};
+    Key m_prevroot_full_key{0};
+    std::unique_ptr<UCTNode> m_root;
     std::atomic<int> m_nodes{0};
     std::atomic<int> m_playouts{0};
-    std::atomic<int64_t> m_target_time{0};
-    std::atomic<int64_t> m_start_time{0};
+    std::atomic<int> m_maxdepth{0};
+    std::atomic<int> m_tbhits{0};
+    int64_t m_target_time{0};
+    int64_t m_max_time{0};
+    int64_t m_start_time{0};
     std::atomic<bool> m_run{false};
     int m_maxplayouts;
+    int m_maxnodes;
 
     bool quiet_ = true;
+    std::atomic<bool> uci_stop{false};
+
+    std::unordered_set<int> m_tbpruned;
 
     int get_search_time();
 };

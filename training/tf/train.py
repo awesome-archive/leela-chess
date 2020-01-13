@@ -16,18 +16,14 @@
 #    You should have received a copy of the GNU General Public License
 #    along with Leela Zero.  If not, see <http://www.gnu.org/licenses/>.
 
-import binascii
+import argparse
 import os
 import yaml
 import sys
 import glob
 import gzip
 import random
-import math
 import multiprocessing as mp
-import numpy as np
-import os
-import time
 import tensorflow as tf
 from tfprocess import TFProcess
 from chunkparser import ChunkParser
@@ -86,47 +82,15 @@ class FileDataSrc:
                 print("failed to parse {}".format(filename))
 
 
-def benchmark(parser):
-    """
-        Benchmark for parser
-    """
-    gen = parser.parse()
-    batch=100
-    while True:
-        start = time.time()
-        for _ in range(batch):
-            next(gen)
-        end = time.time()
-        print("{} pos/sec {} secs".format( ChunkParser.BATCH_SIZE * batch / (end - start), (end - start)))
-
-
-def benchmark1(t):
-    """
-        Benchmark for full input pipeline, including tensorflow conversion
-    """
-    batch=100
-    while True:
-        start = time.time()
-        for _ in range(batch):
-            t.session.run([t.next_batch],
-                    feed_dict={t.training: True, t.learning_rate: 0.01, t.handle: t.train_handle})
-
-        end = time.time()
-        print("{} pos/sec {} secs".format( ChunkParser.BATCH_SIZE * batch / (end - start), (end - start)))
-
-
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: {} config.yaml".format(sys.argv[0]))
-        return 1
-
-    cfg = yaml.safe_load(open(sys.argv[1], 'r').read())
+def main(cmd):
+    cfg = yaml.safe_load(cmd.cfg.read())
     print(yaml.dump(cfg, default_flow_style=False))
 
     num_chunks = cfg['dataset']['num_chunks']
     chunks = get_latest_chunks(cfg['dataset']['input'], num_chunks)
 
-    num_train = int(num_chunks*cfg['dataset']['train_ratio'])
+    train_ratio = cfg['dataset']['train_ratio']
+    num_train = int(num_chunks*train_ratio)
     shuffle_size = cfg['training']['shuffle_size']
     ChunkParser.BATCH_SIZE = cfg['training']['batch_size']
 
@@ -134,19 +98,17 @@ def main():
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
-    #bench_parser = ChunkParser(FileDataSrc(chunks[:1000]), shuffle_size=1<<14, sample=SKIP, batch_size=ChunkParser.BATCH_SIZE)
-    #benchmark(bench_parser)
-
     train_parser = ChunkParser(FileDataSrc(chunks[:num_train]),
             shuffle_size=shuffle_size, sample=SKIP, batch_size=ChunkParser.BATCH_SIZE)
-    #benchmark(train_parser)
     dataset = tf.data.Dataset.from_generator(
         train_parser.parse, output_types=(tf.string, tf.string, tf.string))
     dataset = dataset.map(ChunkParser.parse_function)
     dataset = dataset.prefetch(4)
     train_iterator = dataset.make_one_shot_iterator()
 
-    test_parser = ChunkParser(FileDataSrc(chunks[num_train:]), batch_size=ChunkParser.BATCH_SIZE)
+    shuffle_size = int(shuffle_size*(1.0-train_ratio))
+    test_parser = ChunkParser(FileDataSrc(chunks[num_train:]), 
+            shuffle_size=shuffle_size, sample=SKIP, batch_size=ChunkParser.BATCH_SIZE)
     dataset = tf.data.Dataset.from_generator(
         test_parser.parse, output_types=(tf.string, tf.string, tf.string))
     dataset = dataset.map(ChunkParser.parse_function)
@@ -161,15 +123,26 @@ def main():
         tfprocess.restore(cp)
 
     # Sweeps through all test chunks statistically
-    num_evals = int(round(((num_chunks-num_train) * (200 / SKIP)) / ChunkParser.BATCH_SIZE))
+    num_evals = (num_chunks-num_train)*10 // ChunkParser.BATCH_SIZE
     print("Using {} evaluation batches".format(num_evals))
 
-    # while True:
     for _ in range(cfg['training']['total_steps']):
         tfprocess.process(ChunkParser.BATCH_SIZE, num_evals)
 
+    tfprocess.save_leelaz_weights(cmd.output)
+
+    tfprocess.session.close()
+    train_parser.shutdown()
+    test_parser.shutdown()
 
 if __name__ == "__main__":
+    argparser = argparse.ArgumentParser(description=\
+    'Tensorflow pipeline for training Leela Chess.')
+    argparser.add_argument('--cfg', type=argparse.FileType('r'), 
+        help='yaml configuration with training parameters')
+    argparser.add_argument('--output', type=str, 
+        help='file to store weights in')
+
     mp.set_start_method('spawn')
-    main()
+    main(argparser.parse_args())
     mp.freeze_support()
